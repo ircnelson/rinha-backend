@@ -1,3 +1,4 @@
+using System.Text.Json.Nodes;
 using Npgsql;
 using NpgsqlTypes;
 
@@ -5,6 +6,12 @@ namespace Rinha2024q1.WebApplication.Components;
 
 public class Database
 {
+    private readonly static IDictionary<char, string> _procedures = new Dictionary<char, string> 
+    {
+        { 'd', "SELECT \"debitar\"(@ClienteId, @Valor, @Descricao)" },
+        { 'c', "SELECT \"creditar\"(@ClienteId, @Valor, @Descricao)" }
+    };
+
     private readonly NpgsqlConnection _dbConnection;
 
     public Database(NpgsqlConnection dbConnection)
@@ -12,7 +19,7 @@ public class Database
         _dbConnection = dbConnection;
     }
 
-    public async Task<Conta?> GetExtratoAsync(int id)
+    public async Task<JsonObject?> GetExtratoAsync(int id)
     {
         const string query = """
                              SELECT clientes.limite,
@@ -46,22 +53,36 @@ public class Database
                 return null;
             }
 
-            var conta = new Conta(id, dataReader.GetInt32(0), dataReader.GetInt32(1));
+            var doc = new JsonObject {
+                {   "saldo", new JsonObject
+                    {
+                        { "limite", dataReader.GetInt32(0) },
+                        { "total", dataReader.GetInt32(1) }
+                    }
+                }
+            };
 
             if (!dataReader.NextResult())
             {
-                return conta;
+                return doc;
             }
+
+            var ultimasTransacoes = new JsonArray();
 
             while (await dataReader.ReadAsync())
             {
-                conta.AddTransaction(dataReader.GetInt32(0), 
-                    dataReader.GetChar(1), 
-                    dataReader.GetString(2),
-                    new DateTimeOffset(dataReader.GetDateTime(3)));
-            }
+                ultimasTransacoes.Add(new JsonObject {
+                    { "valor", dataReader.GetInt32(0) },
+                    { "tipo", dataReader.GetChar(1) },
+                    { "descricao", dataReader.GetString(2) },
+                    { "realizado_em", new DateTimeOffset(dataReader.GetDateTime(3)).ToString("R") }
+                });
 
-            return conta;
+            }
+            
+            doc.Add("ultimas_transacoes", ultimasTransacoes);
+
+            return doc;
         }
         finally
         {
@@ -69,17 +90,10 @@ public class Database
         }
     }
 
-    public async Task<(bool, int, int)> CriarTransacaoAsync(int clienteId, int valor, char tipo, string descricao)
+    public async Task<JsonObject?> CriarTransacaoAsync(int clienteId, int valor, char tipo, string descricao)
     {
-        var query = tipo switch
-        {
-            'c' => "SELECT \"creditar\"(@ClienteId, @Valor, @Descricao)",
-            'd' => "SELECT \"debitar\"(@ClienteId, @Valor, @Descricao)",
-            _ => throw new InvalidOperationException()
-        };
-        
         await using var cmd = _dbConnection.CreateCommand();
-        cmd.CommandText = query;
+        cmd.CommandText = _procedures[tipo];
 
         cmd.Parameters.AddWithValue("@ClienteId", NpgsqlDbType.Integer, clienteId);
         cmd.Parameters.AddWithValue("@Valor", NpgsqlDbType.Integer, valor);
@@ -91,7 +105,15 @@ public class Database
 
             var commandResult = (object[]) (await cmd.ExecuteScalarAsync())!;
 
-            return (commandResult[0] is 0, (int)commandResult[1], (int)commandResult[2]);
+            if (commandResult[0] is 1) {
+                return null;
+            }
+
+            return new JsonObject 
+            {
+                { "limite", (int)commandResult[1] },
+                { "saldo", (int)commandResult[2] }
+            };
         }
         finally
         {

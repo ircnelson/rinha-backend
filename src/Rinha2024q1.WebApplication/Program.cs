@@ -1,4 +1,3 @@
-using System.Text.Json;
 using Microsoft.AspNetCore.Http.Timeouts;
 using Microsoft.AspNetCore.Mvc;
 using Npgsql;
@@ -8,22 +7,10 @@ var builder = WebApplication.CreateSlimBuilder(args);
 
 builder.Services.AddRequestTimeouts(options => options.DefaultPolicy = new RequestTimeoutPolicy
 {
-    Timeout = TimeSpan.FromSeconds(10)
-});
-builder.Services.ConfigureHttpJsonOptions(options =>
-{
-    options.SerializerOptions.PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower;
+    Timeout = TimeSpan.FromSeconds(2)
 });
 
 builder.Services.AddResponseCompression();
-
-builder.Services.AddScoped<NpgsqlConnection>(_ =>
-{
-    var connection = new NpgsqlConnection(builder.Configuration.GetConnectionString("Postgres"));
-    return connection;
-});
-
-builder.Services.AddScoped<Database>();
 
 var app = builder.Build();
 
@@ -33,8 +20,7 @@ app.UseRequestTimeouts();
 app.MapPost("/clientes/{id}/transacoes", async (
     HttpContext ctx,
     [FromRoute] string id,
-    [FromBody] CreateTransactionRequest request,
-    [FromServices] Database db) =>
+    [FromBody] CreateTransactionRequest request) =>
 {
     if (!int.TryParse(id, out var clienteId))
     {
@@ -48,8 +34,7 @@ app.MapPost("/clientes/{id}/transacoes", async (
         return;
     }
 
-    if (!request.Tipo.Equals("d", StringComparison.InvariantCultureIgnoreCase) &&
-        !request.Tipo.Equals("c", StringComparison.InvariantCultureIgnoreCase))
+    if (request.Tipo != "d" && request.Tipo != "c")
     {
         ctx.Response.StatusCode = 422;
         return;
@@ -61,22 +46,25 @@ app.MapPost("/clientes/{id}/transacoes", async (
         return;
     }
 
-    var (ok, limite, saldo) = await db.CriarTransacaoAsync(clienteId, (int)request.Valor, request.Tipo[0], request.Descricao);
+    await using var connection = new NpgsqlConnection(builder.Configuration.GetConnectionString("Postgres"));
 
-    if (ok)
+    var db = new Database(connection);
+
+    var conta = await db.CriarTransacaoAsync(clienteId, (int)request.Valor, request.Tipo[0], request.Descricao);
+
+    if (conta is not null)
     {
-        await ctx.Response.WriteAsJsonAsync(new { limite, saldo });
+        await ctx.Response.WriteAsJsonAsync(conta);
+        return;
     }
-    else
-    {
-        ctx.Response.StatusCode = 422;
-    }
+
+    ctx.Response.StatusCode = 422;
+
 });
 
 app.MapGet("/clientes/{id}/extrato", async (
     HttpContext ctx, 
-    [FromRoute] string id,
-    [FromServices] Database db) =>
+    [FromRoute] string id) =>
 {
     if (!int.TryParse(id, out var clienteId))
     {
@@ -84,20 +72,15 @@ app.MapGet("/clientes/{id}/extrato", async (
         return;
     }
 
+    await using var connection = new NpgsqlConnection(builder.Configuration.GetConnectionString("Postgres"));
+
+    var db = new Database(connection);
+
     var conta = await db.GetExtratoAsync(clienteId);
 
     if (conta is not null)
     {
-        await ctx.Response.WriteAsJsonAsync(new
-        {
-            Saldo = new
-            {
-                conta.Limite,
-                Total = conta.Saldo,
-            },
-            UltimasTransacoes = conta.Transacoes
-        });
-        
+        await ctx.Response.WriteAsJsonAsync(conta);
         return;
     }
 
